@@ -1,0 +1,76 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    keypair: jenkins-key
+    instance_type: t2.micro
+    region: us-east-2
+    subnet: subnet-45566a2d
+  tasks:
+    - name: Provision a Artifactory instance
+      ec2:
+         key_name: "{{ keypair }}"
+         group: Jenkins
+         instance_type: "{{ instance_type }}"
+         aws_access_key: "{{ ec2_access_key }}"
+         aws_secret_key: "{{ ec2_secret_key }}"
+         image: "{{ ami_id }}"
+         wait: true
+         region: "{{ region }}"
+         vpc_subnet_id: "{{ subnet }}"
+         assign_public_ip: yes
+         termination_protection: yes
+         exact_count: 1
+         count_tag:
+            Name: Artifactory
+         instance_tags:
+            Name: Artifactory
+      register: provision
+
+    - name: Get ec2 instance info
+      ec2_instance_facts:
+        aws_access_key: "{{ ec2_access_key }}"
+        aws_secret_key: "{{ ec2_secret_key }}"
+        region: "{{ region }}"
+        filters:
+          "tag:Name": Artifactory
+      register: ec2
+      when: provision is succeeded
+
+    - name: Add new instance to host group
+      add_host:
+        hostname: "{{ item.public_dns_name }}"
+        groupname: launched
+      with_items: "{{ ec2.instances }}"
+  
+    - name: Wait 300 seconds for port 22 to become open and contain OpenSSH
+      wait_for:
+        port: 22
+        host: "{{ item.public_dns_name }}"
+        search_regex: OpenSSH
+        delay: 30
+        timeout: 300
+      connection: local
+      with_items: "{{ ec2.instances }}"
+
+- hosts: launched
+  become: true
+  gather_facts: no
+  tasks:
+    - name: Install docker
+      yum: 
+        name: docker
+        state: present
+        use_backend: yum
+      with_items:
+         - docker
+         - java-1.8.0-openjdk
+    
+    - name: Start service docker, if not started
+      service:
+        name: docker
+        state: started
+    
+    - name: Download and run artifactory oss latest docker image
+      shell: docker run --name artifactory -d -p 8081:8081 --ulimit nofile=32000:40000 -e EXTRA_JAVA_OPTIONS="-Xms512m -Xmx512m -Xss256k -XX:+UseG1GC" docker.bintray.io/jfrog/artifactory-oss:latest
